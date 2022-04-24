@@ -1,0 +1,384 @@
+package mcr;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.artifact.DefaultArtifact;
+import org.neo4j.driver.v1.AccessMode;
+import org.neo4j.driver.v1.AuthTokens;
+import org.neo4j.driver.v1.Driver;
+import org.neo4j.driver.v1.GraphDatabase;
+import org.neo4j.driver.v1.Record;
+import org.neo4j.driver.v1.Session;
+import org.neo4j.driver.v1.StatementResult;
+import org.neo4j.driver.v1.exceptions.NoSuchRecordException;
+import org.rascalmpl.interpreter.Evaluator;
+import org.rascalmpl.interpreter.NullRascalMonitor;
+import org.rascalmpl.interpreter.env.GlobalEnvironment;
+import org.rascalmpl.interpreter.env.ModuleEnvironment;
+import org.rascalmpl.interpreter.load.StandardLibraryContributor;
+import org.rascalmpl.library.Prelude;
+import org.rascalmpl.values.ValueFactoryFactory;
+
+import io.usethesource.vallang.ISet;
+import io.usethesource.vallang.IValue;
+import io.usethesource.vallang.IValueFactory;
+import nl.cwi.swat.aethereal.AetherDownloader;
+
+class MavenDataset {
+	private final Driver driver;
+	private final AetherDownloader downloader = new AetherDownloader(10);
+	private static final Logger logger = LogManager.getLogger(MavenDataset.class);
+
+	static final String NEO4J_HOST = "bolt://localhost:7687";
+	static final String NEO4J_USER = "neo4j";
+	static final String NEO4J_PWD  = "neo4j";
+
+	static final String CLIENTS_CSV              = "clients.csv";
+	static final String LIBRARIES_CSV            = "libraries.csv";
+	static final String SAMPLE_CSV               = "sample.csv";
+	static final String SAMPLE_CLIENTS_CSV       = "sample-clients.csv";
+	static final String SAMPLE_CLIENTS_STATS_CSV = "sample-clients-stats.csv";
+	static final String DELTAS_CSV               = "deltas.csv";
+	static final String ALL_ARTIFACTS            = "all-artifacts.csv";
+	static final String RQ1_LIBRARIES            = "data/rq1/rq1-libraries.csv";
+	static final String RQ1_SAMPLE               = "data/rq1/rq1-sample.csv";
+	static final String RQ1_VERSIONS             = "data/rq1/rq1-versions.csv";
+	static final String RQ1_DELTAS               = "data/rq1/rq1-deltas.csv";
+	static final String RQ1_DELTAS_PATH          = "data/rq1/deltas/";
+	static final String RQ2_CLIENTS              = "data/rq2/rq2-clients.csv";
+
+	static final String JAR_PATH     = "/home/dig/jars/";
+	static final String MARACAS_PATH = "/home/dig/repositories/maracas/maracas/src";
+
+	static final boolean KEEP_DOWNLOADED_JARS = true;
+
+	public static class ArtifactNotFoundException extends Exception {
+		private static final long serialVersionUID = 1L;
+
+		public ArtifactNotFoundException(String message) {
+			super(message);
+		}
+	}
+
+	public MavenDataset(Driver d) {
+		driver = d;
+	}
+
+	/**
+	 * Extract a list of <libv1, libv2, clientv1, clientv2> tuples such that
+	 * next*(libv1, libv2), next(clientv1, clientv2),
+	 * depends(clientv1, libv1), depends(clientv2, libv2)
+	 * and output the results to {@link #CLIENTS_CSV}
+	 */
+	public void writeClientsOfLibraries() {
+		try (
+			Session session = driver.session(AccessMode.READ);
+			FileWriter csv = new FileWriter(CLIENTS_CSV)
+		) {
+			csv.append("group,artifact,packaging,v1,v2," +
+						"group1,artifact1,version1,packaging1,scope1," +
+						"group2,artifact2,version2,packaging2,scope2\n");
+
+			StatementResult result = session.run(
+				  "MATCH (c1)-[d1:DEPENDS_ON]->(l1)-[:NEXT*]->(l2)<-[d2:DEPENDS_ON]-(c2)<-[:NEXT]-(c1) "
+				+ "RETURN DISTINCT "
+					+ "l1.groupID   AS group, "
+					+ "l1.artifact  AS artifact, "
+					+ "l1.packaging AS packaging, "
+					+ "l1.version   AS v1, "
+					+ "l2.version   AS v2, "
+					+ "c1.groupID   AS group1, "
+					+ "c1.artifact  AS artifact1, "
+					+ "c1.version   AS version1, "
+					+ "c1.packaging AS packaging1, "
+					+ "d1.scope     AS scope1, "
+					+ "c2.groupID   AS group2, "
+					+ "c2.artifact  AS artifact2, "
+					+ "c2.version   AS version2, "
+					+ "c2.packaging AS packaging2, "
+					+ "d2.scope     AS scope2"
+			);
+
+			while (result.hasNext()) {
+				Record row = result.next();
+
+				String group      = row.get("group").asString();
+				String artifact   = row.get("artifact").asString();
+				String packaging  = row.get("packaging").asString().toLowerCase();
+				String v1         = row.get("v1").asString();
+				String v2         = row.get("v2").asString();
+				String group1     = row.get("group1").asString();
+				String artifact1  = row.get("artifact1").asString();
+				String version1   = row.get("version1").asString();
+				String packaging1 = row.get("packaging1").asString().toLowerCase();
+				String scope1     = row.get("scope1").asString();
+				String group2     = row.get("group2").asString();
+				String artifact2  = row.get("artifact2").asString();
+				String version2   = row.get("version2").asString();
+				String packaging2 = row.get("packaging2").asString().toLowerCase();
+				String scope2     = row.get("scope2").asString();
+
+				csv.append(String.format("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s%n",
+						group, artifact, packaging, v1, v2,
+						group1, artifact1, version1, packaging1, scope1,
+						group2, artifact2, version2, packaging2, scope2));
+			}
+		} catch (IOException e) {
+			logger.error(e);
+		}
+	}
+
+	/**
+	 * Read as input the list of libraries extracted by
+	 * {@link #writeClientsOfLibraries()} stored in {@link #CLIENTS_CSV} and, for
+	 * each library, extract its properties and output the result to
+	 * {@link #LIBRARIES_CSV}
+	 */
+	public void writeLibraryProperties() {
+		try (BufferedReader br = new BufferedReader(new FileReader(CLIENTS_CSV));
+			 FileWriter csv = new FileWriter(LIBRARIES_CSV)) {
+			Set<String> seen = new HashSet<>();
+
+			csv.append(
+				"group,artifact,packaging,lastVersion,jar,releases,age,clients,internal,external,javaVersion," +
+				"declarations,public_declarations,types,public_types,classes,public_classes," +
+				"interfaces,abstract,public_abstract,enums,public_enums," +
+				"methods,public_methods,fields,public_fields\n");
+
+			String line = br.readLine(); // Skip headers
+			ExecutorService executor = Executors.newFixedThreadPool(4);
+			while ((line = br.readLine()) != null) {
+				String[] values = line.split(",");
+				String groupId = values[0];
+				String artifactId = values[1];
+				String packaging = values[2];
+
+				if (!seen.contains(groupId + artifactId)) {
+					seen.add(groupId + artifactId);
+
+					executor.execute(() -> {
+						String query =
+							  "MATCH p=(first)-[:NEXT*0..]->(l1: `" + groupId + "`)-[:NEXT*0..]->(last) "
+								+ "WHERE NOT (last)-[:NEXT]->() "
+								+ "AND NOT (first)<-[:NEXT]-() "
+								+ "AND l1.artifact = \"" + artifactId + "\" "
+								+ "AND length(p) > 1 "
+							+ "UNWIND nodes(p) AS r "
+							+ "MATCH (r) WITH min(r.release_date) AS firstRelease, max(r.release_date) AS lastRelease, l1, p "
+							+ "MATCH (c)-[:DEPENDS_ON]->(l1) "
+								+ "WITH collect(c) AS clients, p, firstRelease, lastRelease "
+							+ "UNWIND nodes(p) AS r "
+							+ "MATCH (r) WITH r, clients, p, firstRelease, lastRelease ORDER BY r.release_date DESC LIMIT 3 "
+							+ "RETURN DISTINCT "
+								+ "r.version as lastVersion, "
+								+ "length(p) + 1 AS releases, "
+								+ "duration.between(datetime(firstRelease), datetime(lastRelease)).months AS age, "
+								+ "size([x IN clients WHERE x.groupID = \"" + groupId + "\"]) AS internals, "
+								+ "size([x IN clients WHERE x.groupID <> \"" + groupId + "\"]) AS externals";
+
+						try {
+							Session session = driver.session(AccessMode.READ);
+							StatementResult result = session.run(query);
+
+							while (result.hasNext()) {
+								Record row = result.next();
+
+								String version = row.get("lastVersion").asString();
+								int releases = row.get("releases").asInt();
+								int age = row.get("age").asInt();
+								int internals = row.get("internals").asInt();
+								int externals = row.get("externals").asInt();
+								int totalClients = internals + externals;
+								JarStatistics stats = new JarStatistics();
+
+								Artifact toDownload = new DefaultArtifact(groupId, artifactId, packaging, version);
+								Artifact downloaded = downloader.downloadArtifactTo(toDownload, JAR_PATH);
+
+								if (downloaded != null) {
+									Path localJar = downloaded.getFile().toPath();
+									stats.compute(localJar);
+
+									if (!KEEP_DOWNLOADED_JARS)
+										localJar.toFile().delete();
+
+									synchronized (csv) {
+										csv.append(String.format(
+												"%s,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%n",
+												groupId, artifactId, packaging, version, localJar.toString(), releases, age, totalClients,
+												internals, externals, stats.getJavaVersion(), stats.getDeclarations(),
+												stats.getPublicDeclarations(), stats.getTypes(),
+												stats.getPublicTypes(), stats.getClasses(),
+												stats.getPublicClasses(), stats.getInterfaces(),
+												stats.getAbstractClasses(), stats.getPublicAbstractClasses(),
+												stats.getEnums(), stats.getPublicEnums(), stats.getMethods(),
+												stats.getPublicMethods(), stats.getFields(),
+												stats.getPublicFields()));
+										csv.flush();
+									}
+
+									break;
+								} else {
+									if (!result.hasNext()) {
+										synchronized (csv) {
+											csv.append(String.format(
+													"%s,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%n",
+													groupId, artifactId, packaging, version, -1, releases, age, totalClients,
+													internals, externals, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+													-1, -1, -1, -1, -1, -1));
+											csv.flush();
+										}
+									}
+								}
+							}
+						} catch (Exception e) {
+							logger.error("E:", e);
+							try {
+								synchronized (csv) {
+									csv.append(String.format(
+											"%s,%s,%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d%n",
+											groupId, artifactId, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+											-1, -1, -1, -1, -1, -1, -1, -1, -1));
+									csv.flush();
+								}
+							} catch (IOException e1) {
+								logger.error("IOE:", e);
+							}
+						}
+					});
+				}
+			}
+
+			executor.shutdown();
+			try {
+				executor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				logger.error("IE:", e);
+
+			}
+		} catch (IOException e) {
+			logger.error("IOE:", e);
+		}
+	}
+
+	public void writeClientsOfSample() {
+		try (BufferedReader clientsBr = new BufferedReader(new FileReader(CLIENTS_CSV));
+				BufferedReader sampleBr = new BufferedReader(new FileReader(SAMPLE_CSV));
+				FileWriter csv = new FileWriter(SAMPLE_CLIENTS_CSV)) {
+			Set<String> sample = new HashSet<>();
+
+			String line = sampleBr.readLine(); // Skip headers
+			while ((line = sampleBr.readLine()) != null) {
+				String[] fields = line.split(",");
+				String groupId = fields[1].substring(1, fields[1].length() - 1);
+				String artifactId = fields[2].substring(1, fields[2].length() - 1);
+				sample.add(groupId + "," + artifactId);
+			}
+
+			line = clientsBr.readLine(); // Skip headers
+			csv.append(line + "\n");
+			while ((line = clientsBr.readLine()) != null) {
+				String[] fields = line.split(",");
+				String groupId = fields[0];
+				String artifactId = fields[1];
+				String v1 = fields[2];
+				String v2 = fields[3];
+				String sm = "((\\d+)\\.(\\d+)\\.(\\d+))";
+
+				// Shall we restrict to versions that 'comply' with semantic versioning?
+
+				if (sample.contains(groupId + "," + artifactId)) {
+					csv.append(line + "\n");
+				}
+			}
+		} catch (IOException e) {
+			logger.error("IOE:", e);
+		}
+	}
+
+	private Evaluator createRascalEvaluator(IValueFactory vf) {
+		GlobalEnvironment heap = new GlobalEnvironment();
+		ModuleEnvironment module = new ModuleEnvironment("$maven$", heap);
+		PrintWriter stderr = new PrintWriter(System.err);
+		PrintWriter stdout = new PrintWriter(System.out);
+		Evaluator eval = new Evaluator(vf, stderr, stdout, module, heap);
+
+		eval.addRascalSearchPathContributor(StandardLibraryContributor.getInstance());
+		eval.addRascalSearchPath(vf.sourceLocation(Paths.get(MARACAS_PATH).toAbsolutePath().toString()));
+		eval.doImport(new NullRascalMonitor(), "org::maracas::delta::JApiCmp");
+
+		return eval;
+	}
+
+	public void downloadAllJars() {
+		List<Artifact> toDownload = new ArrayList<>();
+
+		try (BufferedReader br = new BufferedReader(new FileReader(ALL_ARTIFACTS))) {
+			String line = br.readLine(); // Skip headers
+			while ((line = br.readLine()) != null) {
+				String[] fields = line.split(",");
+				String groupId = fields[0];
+				String artifactId = fields[1];
+				String version = fields[2];
+
+				toDownload.add(new DefaultArtifact(groupId, artifactId, "jar", version));
+			}
+		} catch (IOException e) {
+			logger.error("IOE:", e);
+		}
+
+		toDownload.parallelStream().forEach(a -> downloader.downloadArtifact(a));
+	}
+
+	public static void main(String[] args) {
+		try (Driver driver = GraphDatabase.driver(NEO4J_HOST, AuthTokens.basic(NEO4J_USER, NEO4J_PWD))) {
+			MavenDataset rq = new MavenDataset(driver);
+
+			Instant t1 = Instant.now();
+			rq.computeDeltas();
+			Instant t2 = Instant.now();
+			logger.info("computeDeltas() took " + Duration.between(t1, t2).toMinutes() + " minutes.");
+			
+//			Instant t1 = Instant.now();
+//			rq.writeClientsOfLibraries();
+//			Instant t2 = Instant.now();
+//			logger.info("writeClientsOfLibraries() took " + Duration.between(t1, t2).toMinutes() + " minutes.");
+//
+//			Instant t3 = Instant.now();
+//			rq.writeLibraryProperties();
+//			Instant t4 = Instant.now();
+//			logger.info("writeLibraryProperties() took " + Duration.between(t3, t4).toMinutes() + " minutes.");
+//
+//			Instant t5 = Instant.now();
+//			rq.writeClientsOfSample();
+//			Instant t6 = Instant.now();
+//			logger.info("writeClientsOfSample() took " + Duration.between(t5, t6).toMinutes() + " minutes.");
+//
+//			Instant t7 = Instant.now();
+//			rq.computeDeltas();
+//			Instant t8 = Instant.now();
+//			logger.info("computeDeltas() took " + Duration.between(t7, t8).toMinutes() + " minutes.");
+		} catch (Exception e) {
+			logger.error("E:", e);
+		}
+	}
+}
