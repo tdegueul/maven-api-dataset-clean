@@ -1,6 +1,6 @@
 # Breaking Bad? Dataset & Analysis
 
-The code, datasets, and notebooks presented in this repository accompany the paper [“Breaking Bad? Semantic Versioning and Impact of Breaking Changes in Maven Central”](dx.doi.org/10.1007/s10664-021-10052-y) authored by Lina Ochoa, Thomas Degueule, Jean-Rémy Falleri, and Jurgen Vinju, and published in the Journal of Empirical Software Engineering. Please refer to the [companion webpage](https://crossminer.github.io/maracas/2021/08/16/emse21/) for more information, or to the [Zenodo package](https://zenodo.org/record/5221840) to access the datasets.
+The code, datasets, and notebooks presented in this repository accompany the paper [“Breaking Bad? Semantic Versioning and Impact of Breaking Changes in Maven Central”](https://dx.doi.org/10.1007/s10664-021-10052-y) authored by Lina Ochoa, Thomas Degueule, Jean-Rémy Falleri, and Jurgen Vinju, and published in the Journal of Empirical Software Engineering. Please refer to the [companion webpage](https://crossminer.github.io/maracas/2021/08/16/emse21/) for more information, or to the [Zenodo package](https://zenodo.org/record/5221840) to access the datasets.
 
 ## Table of Contents
 * [Content](#content)
